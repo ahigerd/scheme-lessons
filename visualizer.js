@@ -309,13 +309,17 @@ function evaluate()
 
 function singleStep()
 {
-  if (lastStep === undefined) {
-    prepare();
-  } else {
-    lastStep = lastStep.map(x => scmStep(x).expr).filter(x => x !== undefined);
-    el.steps.innerHTML = '<hr/>' + el.output.innerHTML + el.steps.innerHTML;
+  try {
+    if (lastStep === undefined) {
+      prepare();
+    } else {
+      el.steps.innerHTML = '<hr/>' + el.output.innerHTML + el.steps.innerHTML;
+      lastStep = lastStep.map(x => scmStep(x).expr).filter(x => x !== undefined);
+    }
+    el.output.innerText = lastStep.map(scmStringify).join('\n');
+  } catch (err) {
+    el.output.innerHTML = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
   }
-  el.output.innerText = lastStep.map(scmStringify).join('\n');
 }
 
 function clearLastStep() {
