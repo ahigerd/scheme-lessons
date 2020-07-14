@@ -211,6 +211,10 @@ function tokenize(expr)
 function substitute(subs, body)
 {
   if (Array.isArray(body)) {
+    if (body.length > 0 && resolveSymbolIn(body[0], [macros])) {
+      // Don't expand macros at the substitution step
+      return body;
+    }
     const result = [];
     for (const x of body) {
       if (isSymbol(x) && x.symbol in subs) {
