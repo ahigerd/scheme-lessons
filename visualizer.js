@@ -79,6 +79,36 @@ macros['if'] = function(expr) {
   }
 };
 
+macros['define-struct'] = function(expr) {
+  const structName = expr[1].symbol;
+  const args = expr[2].map(x => x.symbol);
+  const toString = function() {
+    return `<${structName} ${args.map(a => scmStringify(this[a])).join(' ')}>`;
+  }
+  const isStruct = function(expr) {
+    return expr[1] && expr[1].structName == structName;
+  };
+
+  defun(`make-${structName}`, function(expr) {
+    const obj = { structName, toString };
+    for (let i = 0; i < args.length; i++) {
+      obj[args[i]] = expr[i + 1];
+    }
+    return obj;
+  });
+
+  defun(`${structName}?`, isStruct);
+
+  for (const arg of args) {
+    defun(`${structName}-${arg}`, function(expr) {
+      if (!isStruct(expr)) {
+        throw new Error(`${structName}-${arg} expected ${structName}, got ${scmStringify(expr[1])}`);
+      }
+      return expr[1][arg];
+    });
+  }
+}
+
 defun('not', function(expr) { return isFalse(expr[1]); });
 for (const op of ['>', '<', '>=', '<=', '==', '+', '-', '*', '/']) {
   defun(op, eval(`expr => parseFloat(expr[1]) ${op} parseFloat(expr[2])`));
@@ -129,9 +159,9 @@ function tokenize(expr)
         i++;
       }
     } else if (parenCount > 0) {
-      if (ch == '(') {
+      if (ch == '(' || ch == '[') {
         parenCount++;
-      } else if (ch == ')') {
+      } else if (ch == ')' || ch == ']') {
         parenCount--;
         if (parenCount == 0) {
           ast.push(tokenize(expr.substring(tokenStart, i)));
@@ -147,7 +177,7 @@ function tokenize(expr)
       } else {
         tokenStart = false;
       }
-    } else if (ch == '(') {
+    } else if (ch == '(' || ch == '[') {
       parenCount = 1;
       tokenStart = i + 1;
     } else if (tokenStart === false) {
@@ -202,6 +232,8 @@ function scmStringify(expr)
     return expr.symbol;
   } else if (Array.isArray(expr)) {
     return '(' + expr.map(scmStringify).join(' ') + ')';
+  } else if (expr.hasOwnProperty('toString')) {
+    return expr.toString();
   } else {
     return JSON.stringify(expr);
   }
@@ -267,8 +299,12 @@ function prepare()
 function evaluate()
 {
   prepare();
-  const result = scmEval(lastStep);
-  el.output.innerText = result.map(scmStringify).join('\n');
+  try {
+    const result = scmEval(lastStep);
+    el.output.innerText = result.map(scmStringify).join('\n');
+  } catch (err) {
+    el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
+  }
 }
 
 function singleStep()
@@ -282,6 +318,10 @@ function singleStep()
   el.output.innerText = lastStep.map(scmStringify).join('\n');
 }
 
+function clearLastStep() {
+  lastStep = undefined;
+}
+
 function saveToLocalStorage() {
   localStorage.defs = el.defs.value;
   localStorage.expr = el.expr.value;
@@ -290,6 +330,10 @@ function saveToLocalStorage() {
 evalButton.onclick = evaluate;
 stepButton.onclick = singleStep;
 saveButton.onclick = saveToLocalStorage;
+el.defs.onchange = clearLastStep;
+el.expr.onchange = clearLastStep;
 
 el.defs.value = localStorage.defs || '';
 el.expr.value = localStorage.expr || '';
+
+scmEval(tokenize("(define-struct posn [x y])"));
