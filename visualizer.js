@@ -67,6 +67,14 @@ macros['define'] = function(expr) {
   return undefined;
 };
 
+macros['lambda'] = function(expr) {
+  return {
+    funcName: '<lambda>',
+    args: expr[1],
+    body: expr[2],
+  };
+};
+
 macros['if'] = function(expr) {
   if (isFalse(expr[1])) {
     return expr[3];
