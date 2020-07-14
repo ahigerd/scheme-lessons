@@ -85,6 +85,18 @@ for (const op of ['>', '<', '>=', '<=', '==', '+', '-', '*', '/']) {
 }
 defs['='] = defs['=='];
 
+function makeBinding(name, jsValue)
+{
+  if (jsValue && jsValue.apply) {
+    defun(name, expr => jsValue.apply(null, expr.slice(1)));
+  } else {
+    defs[name] = jsValue;
+  }
+}
+for (const mathFn of Object.getOwnPropertyNames(Math)) {
+  makeBinding(mathFn, Math[mathFn]);
+}
+
 function bakeToken(token)
 {
   if (token == '#t' || token == '#true') {
