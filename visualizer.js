@@ -143,6 +143,7 @@ function bakeToken(token)
 
 function tokenize(expr)
 {
+  expr = expr.replace(/\s+/g, ' ');
   const len = expr.length;
   const ast = [];
   let tokenStart = false;
