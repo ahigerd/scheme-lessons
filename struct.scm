@@ -19,7 +19,7 @@
       (list 'list-ref 'x index)
       (list 'error (symbol->string struct-prop) "expects ~a, given ~a" structname 'x)
     )
-  )
+  ))
 )
 
 (define-syntax define-struct
