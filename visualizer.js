@@ -70,9 +70,10 @@ macros['define'] = function(expr) {
 
 macros['lambda'] = function(expr) {
   return {
-    funcName: `<lambda ${expr.slice(1).map(scmStringify).join(' ')}>`,
+    funcName: '<lambda>',
     args: expr[1],
     body: expr[2],
+    toString: function() { return `<lambda ${scmStringify(this.args)} ${scmStringify(this.body)}>`; },
   };
 };
 
@@ -92,6 +93,9 @@ function findUnbound(expr, args = [])
 
 macros['if'] = (function(expr, didStep) {
   if (isFalse(expr[1])) {
+    if (expr.length < 3) {
+      return false;
+    }
     return expr[3];
   } else if (expr[1] === true) {
     return expr[2];
@@ -106,6 +110,25 @@ macros['if'] = (function(expr, didStep) {
     result[1] = scmStep(expr[1]).expr;
     return result;
   }
+});
+
+macros['apply'] = (function(expr) {
+  let fn = expr[1];
+  const args = expr.slice(2);
+  if (isSymbol(fn)) {
+    fn = resolveSymbolIn(fn, [defs]);
+  } else if (Array.isArray(fn) && fn.length > 0) {
+    if (isSymbol(fn[0])) {
+      fn = [resolveSymbolIn(fn[0], [defs]), ...fn.slice(1)];
+    }
+    if (isFunction(fn[0])) {
+      return [expr[0], scmStep(fn).expr, ...args];
+    }
+  }
+  if (!isFunction(fn) || !Array.isArray(args)) {
+    throw { doNotExpand: true };
+  }
+  return [ fn, ...args ];
 });
 
 macros['list'] = function(expr) {
@@ -141,15 +164,6 @@ macros['define-struct'] = function(expr) {
     });
   }
 }
-
-defun('apply', function(expr) {
-  const fn = expr[1];
-  const args = expr[2];
-  if (!isFunction(fn) || !Array.isArray(args)) {
-    return expr;
-  }
-  return [ fn, ...args ];
-})
 
 defun('not', function(expr) { return isFalse(expr[1]); });
 for (const op of ['>', '<', '>=', '<=', '==', '+', '-', '*', '/']) {
@@ -242,34 +256,31 @@ function tokenize(expr)
   });
 }
 
-function substitute(subs, body)
+function substitute(subs, body, unpack = [])
 {
   if (Array.isArray(body)) {
     const result = [];
     for (const x of body) {
       if (isSymbol(x) && x.symbol in subs) {
-        result.push(subs[x.symbol]);
-      } else if (isFunction(x) && x.body) {
-        result.push({
-          ...x,
-          body: substitute(subs, x.body),
-        });
-      } else if (Array.isArray(x)) {
-        result.push(x.map(y => substitute(subs, y)));
+        if (unpack.includes(x.symbol)) {
+          result.push(...subs[x.symbol]);
+        } else {
+          result.push(subs[x.symbol]);
+        }
       } else {
-        result.push(x);
+        result.push(substitute(subs, x, unpack));
       }
     }
     return result;
   } else if (isFunction(body) && body.body) {
     const lambdaSubs = {};
-    const shadow = body.args.map(x => x.symbol);
+    const shadow = isSymbol(body.args) ? [body.args.symbol] : body.args.map(x => x.symbol);
     for (const sub in subs) {
       if (!shadow.includes(sub)) {
         lambdaSubs[sub] = subs[sub];
       }
     }
-    return macros.lambda([null, body.args, substitute(lambdaSubs, body.body)]);
+    return macros.lambda([null, body.args, substitute(lambdaSubs, body.body, unpack)]);
   } else if (isSymbol(body) && body.symbol in subs) {
     return subs[body.symbol];
   } else {
@@ -282,6 +293,8 @@ function scmStringify(expr)
   if (expr === undefined) {
     console.trace('???');
     return '';
+  } else if (expr.hasOwnProperty('toString')) {
+    return expr.toString();
   } else if (expr === true) {
     return '#t';
   } else if (expr === false) {
@@ -292,8 +305,6 @@ function scmStringify(expr)
     return expr.symbol;
   } else if (Array.isArray(expr)) {
     return '(' + expr.map(scmStringify).join(' ') + ')';
-  } else if (expr.hasOwnProperty('toString')) {
-    return expr.toString();
   } else {
     return JSON.stringify(expr);
   }
@@ -306,10 +317,19 @@ function scmApply(expr)
   }
   const { args, body } = expr[0];
   const argSub = {};
-  for (let i = 0; i < args.length; i++) {
-    argSub[args[i].symbol] = expr[i + 1];
+  const unpack = [];
+  if (Array.isArray(args)) {
+    for (let i = 0; i < args.length; i++) {
+      argSub[args[i].symbol] = expr[i + 1];
+      if (argSub[args[i].symbol] === undefined) {
+        argSub[args[i].symbol] = false;
+      }
+    }
+  } else if (isSymbol(args)) {
+    argSub[args.symbol] = expr.slice(1);
+    unpack.push(args.symbol);
   }
-  return substitute(argSub, body);
+  return substitute(argSub, body, unpack);
 }
 
 function scmMetaStep(substep, getApply, expr, didStep)
@@ -377,6 +397,20 @@ function scmStep(expr, didStep = false)
   );
 }
 
+function scmEvalAsync(expr, callback)
+{
+  try {
+    const step = scmStep(expr);
+    if (step.step) {
+      setTimeout(() => scmEvalAsync(step.expr, callback), 0);
+    } else {
+      callback(step.expr, null);
+    }
+  } catch (err) {
+    callback(null, err);
+  }
+}
+
 function scmEval(expr)
 {
   let lastStep = { step: true, expr };
@@ -398,13 +432,15 @@ function prepare()
 function evaluate()
 {
   prepare();
-  try {
-    const result = scmEval(lastStep);
-    el.output.innerText = result.map(scmStringify).join('\n');
-  } catch (err) {
-    el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
-    throw err;
-  }
+  scmEvalAsync(lastStep, (result, err) => {
+    if (err) {
+      el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
+      console.error(err);
+    } else {
+      el.output.innerText = result.map(scmStringify).join('\n');
+    }
+    clearLastStep();
+  });
 }
 
 function singleStep()
