@@ -5,8 +5,9 @@ for (const id of ['defs', 'expr', 'output', 'steps', 'saveButton', 'evalButton']
 
 let lastStep = undefined;
 let lastStepString = '';
-const defs = {};
+const staticDefs = {};
 const macros = {};
+let defs = {};
 
 function isFalse(expr) {
   if (Array.isArray(expr) && expr.length == 0) {
@@ -55,7 +56,7 @@ function mustExpand(expr, topLevel = true) {
 }
 
 function defun(funcName, proc) {
-  defs[funcName] = { funcName, proc };
+  staticDefs[funcName] = { funcName, proc };
 }
 
 macros['define'] = function(expr) {
@@ -69,23 +70,47 @@ macros['define'] = function(expr) {
 
 macros['lambda'] = function(expr) {
   return {
-    funcName: '<lambda>',
+    funcName: `<lambda ${expr.slice(1).map(scmStringify).join(' ')}>`,
     args: expr[1],
     body: expr[2],
   };
 };
 
-macros['if'] = function(expr) {
+function findUnbound(expr, args = [])
+{
+  if (Array.isArray(expr)) {
+    return [].concat(...expr.map(x => findUnbound(x, args)));
+  } else if (isFunction(expr) && expr.body) {
+    const childArgs = [...args, ...expr.args.map(x => x.symbol)];
+    return [].concat(...expr.body.map(x => findUnbound(x, childArgs)));
+  } else if (isSymbol(expr) && !args.includes(expr.symbol) && !(expr.symbol in defs)) {
+    return [expr.symbol];
+  } else {
+    return [];
+  }
+}
+
+macros['if'] = (function(expr, didStep) {
   if (isFalse(expr[1])) {
     return expr[3];
   } else if (expr[1] === true) {
     return expr[2];
+  } else if (didStep) {
+    return expr;
   } else {
+    const unbound = findUnbound(expr[1]);
+    if (unbound.length) {
+      throw { doNotExpand: true };
+    }
     const result = [...expr];
     result[1] = scmStep(expr[1]).expr;
     return result;
   }
-};
+});
+
+macros['list'] = function(expr) {
+  return expr.slice(1);
+}
 
 macros['define-struct'] = function(expr) {
   const structName = expr[1].symbol;
@@ -117,18 +142,27 @@ macros['define-struct'] = function(expr) {
   }
 }
 
+defun('apply', function(expr) {
+  const fn = expr[1];
+  const args = expr[2];
+  if (!isFunction(fn) || !Array.isArray(args)) {
+    return expr;
+  }
+  return [ fn, ...args ];
+})
+
 defun('not', function(expr) { return isFalse(expr[1]); });
 for (const op of ['>', '<', '>=', '<=', '==', '+', '-', '*', '/']) {
   defun(op, eval(`expr => parseFloat(expr[1]) ${op} parseFloat(expr[2])`));
 }
-defs['='] = defs['=='];
+staticDefs['='] = staticDefs['=='];
 
 function makeBinding(name, jsValue)
 {
   if (jsValue && jsValue.apply) {
     defun(name, expr => jsValue.apply(null, expr.slice(1)));
   } else {
-    defs[name] = jsValue;
+    staticDefs[name] = jsValue;
   }
 }
 for (const mathFn of Object.getOwnPropertyNames(Math)) {
@@ -211,14 +245,15 @@ function tokenize(expr)
 function substitute(subs, body)
 {
   if (Array.isArray(body)) {
-    if (body.length > 0 && resolveSymbolIn(body[0], [macros])) {
-      // Don't expand macros at the substitution step
-      return body;
-    }
     const result = [];
     for (const x of body) {
       if (isSymbol(x) && x.symbol in subs) {
         result.push(subs[x.symbol]);
+      } else if (isFunction(x) && x.body) {
+        result.push({
+          ...x,
+          body: substitute(subs, x.body),
+        });
       } else if (Array.isArray(x)) {
         result.push(x.map(y => substitute(subs, y)));
       } else {
@@ -226,6 +261,15 @@ function substitute(subs, body)
       }
     }
     return result;
+  } else if (isFunction(body) && body.body) {
+    const lambdaSubs = {};
+    const shadow = body.args.map(x => x.symbol);
+    for (const sub in subs) {
+      if (!shadow.includes(sub)) {
+        lambdaSubs[sub] = subs[sub];
+      }
+    }
+    return macros.lambda([null, body.args, substitute(lambdaSubs, body.body)]);
   } else if (isSymbol(body) && body.symbol in subs) {
     return subs[body.symbol];
   } else {
@@ -235,7 +279,10 @@ function substitute(subs, body)
 
 function scmStringify(expr)
 {
-  if (expr === true) {
+  if (expr === undefined) {
+    console.trace('???');
+    return '';
+  } else if (expr === true) {
     return '#t';
   } else if (expr === false) {
     return '#f';
@@ -256,17 +303,58 @@ function scmApply(expr)
 {
   if (expr[0].proc) {
     return expr[0].proc(expr);
-  } else {
-    const { args, body } = expr[0];
-    const argSub = {};
-    for (let i = 0; i < args.length; i++) {
-      argSub[args[i].symbol] = expr[i + 1];
-    }
-    return substitute(argSub, body);
   }
+  const { args, body } = expr[0];
+  const argSub = {};
+  for (let i = 0; i < args.length; i++) {
+    argSub[args[i].symbol] = expr[i + 1];
+  }
+  return substitute(argSub, body);
 }
 
-function scmStep(expr)
+function scmMetaStep(substep, getApply, expr, didStep)
+{
+  const result = [];
+  for (const child of expr) {
+    if (didStep) {
+      if (child !== undefined) result.push(child);
+    } else {
+      const childResult = substep(child);
+      if (childResult.step) {
+        didStep = true;
+      }
+      if (childResult.expr !== undefined) result.push(childResult.expr);
+    }
+  }
+  if (!didStep && result.length > 0) {
+    const apply = getApply(result[0]);
+    if (apply) {
+      try {
+        return { step: true, expr: apply(result, didStep) };
+      } catch (err) {
+        if (!err.doNotExpand) {
+          throw err;
+        }
+      }
+    }
+  }
+  return { step: didStep, expr: result };
+}
+
+function scmMacroStep(expr, didStep = false)
+{
+  if (!Array.isArray(expr)) {
+    return { step: false, expr };
+  }
+  return scmMetaStep(
+    scmMacroStep,
+    symbol => resolveSymbolIn(symbol, [macros]),
+    expr,
+    didStep,
+  );
+}
+
+function scmStep(expr, didStep = false)
 {
   if (!Array.isArray(expr)) {
     if (expr && typeof expr == 'object' && expr.quote) {
@@ -279,17 +367,14 @@ function scmStep(expr)
   }
   const macro = resolveSymbolIn(expr[0], [macros]);
   if (macro) {
-    return { step: true, expr: macro(expr) };
+    return scmMacroStep(expr);
   }
-  const children = expr.map(scmStep);
-  const childExprs = children.map(x => x.expr).filter(x => x !== undefined);
-  if (children.some(x => x.step)) {
-    return { step: true, expr: childExprs };
-  } else if (children.length > 0 && isFunction(children[0].expr)) {
-    return { step: true, expr: scmApply(childExprs) };
-  } else {
-    return { step: false, expr };
-  }
+  return scmMetaStep(
+    scmStep,
+    obj => isFunction(obj) ? scmApply : null,
+    expr,
+    didStep,
+  );
 }
 
 function scmEval(expr)
@@ -305,6 +390,7 @@ function prepare()
 {
   el.steps.innerHTML = '';
   let defsExpr = tokenize(el.defs.value);
+  defs = Object.create(staticDefs);
   scmEval(defsExpr);
   lastStep = tokenize(el.expr.value);
 }
@@ -317,6 +403,7 @@ function evaluate()
     el.output.innerText = result.map(scmStringify).join('\n');
   } catch (err) {
     el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
+    throw err;
   }
 }
 
@@ -327,11 +414,26 @@ function singleStep()
       prepare();
     } else {
       el.steps.innerHTML = '<hr/>' + el.output.innerHTML + el.steps.innerHTML;
-      lastStep = lastStep.map(x => scmStep(x).expr).filter(x => x !== undefined);
+      const nextStep = [];
+      let didStep = false;
+      for (const x of lastStep) {
+        if (x === undefined) continue;
+        if (didStep) {
+          nextStep.push(x);
+        } else {
+          const result = scmStep(x);
+          didStep = result.step;
+          if (result.expr !== undefined) {
+            nextStep.push(result.expr);
+          }
+        }
+      }
+      lastStep = nextStep;
     }
     el.output.innerText = lastStep.map(scmStringify).join('\n');
   } catch (err) {
     el.output.innerHTML = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
+    throw err;
   }
 }
 
