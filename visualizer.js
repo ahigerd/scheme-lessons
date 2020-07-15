@@ -10,10 +10,7 @@ const macros = {};
 let defs = {};
 
 function isFalse(expr) {
-  if (Array.isArray(expr) && expr.length == 0) {
-    return true;
-  }
-  return expr === false;
+  return expr === false || (Array.isArray(expr) && expr.length == 0);
 }
 
 function isFunction(expr) {
@@ -25,15 +22,11 @@ function isSymbol(expr) {
 }
 
 function resolveSymbolIn(expr, dicts) {
-  if (!isSymbol(expr)) {
-    return undefined;
-  }
-  if (!Array.isArray(dicts)) {
-    dicts = [dicts];
-  }
-  for (const dict of dicts) {
-    if (expr.symbol in dict) {
-      return dict[expr.symbol];
+  if (isSymbol(expr)) {
+    for (const dict of dicts) {
+      if (expr.symbol in dict) {
+        return dict[expr.symbol];
+      }
     }
   }
   return undefined;
@@ -41,18 +34,6 @@ function resolveSymbolIn(expr, dicts) {
 
 function symbol(name) {
   return { symbol: name };
-}
-
-function mustExpand(expr, topLevel = true) {
-  if (Array.isArray(expr)) {
-    return expr.some(x => mustExpand(x, false));
-  } else if (!topLevel && (isFunction(expr) || isSymbol(expr))) {
-    return true;
-  } else if (resolveSymbolIn(expr, [defs, macros]) !== undefined) {
-    return true;
-  } else {
-    return false;
-  }
 }
 
 function defun(funcName, proc) {
@@ -91,24 +72,16 @@ function findUnbound(expr, args = [])
   }
 }
 
-macros['if'] = (function(expr, didStep) {
+macros['if'] = (function(expr) {
   if (isFalse(expr[1])) {
-    if (expr.length < 3) {
-      return false;
-    }
-    return expr[3];
+    return expr.length < 3 ? false : expr[3];
   } else if (expr[1] === true) {
     return expr[2];
-  } else if (didStep) {
-    return expr;
   } else {
-    const unbound = findUnbound(expr[1]);
-    if (unbound.length) {
+    if (findUnbound(expr[1]).length) {
       throw { doNotExpand: true };
     }
-    const result = [...expr];
-    result[1] = scmStep(expr[1]).expr;
-    return result;
+    return [ expr[0], scmStep(expr[1]).expr, ...expr.slice(2) ];
   }
 });
 
@@ -138,12 +111,8 @@ macros['list'] = function(expr) {
 macros['define-struct'] = function(expr) {
   const structName = expr[1].symbol;
   const args = expr[2].map(x => x.symbol);
-  const toString = function() {
-    return `<${structName} ${args.map(a => scmStringify(this[a])).join(' ')}>`;
-  }
-  const isStruct = function(expr) {
-    return expr[1] && expr[1].structName == structName;
-  };
+  const toString = function() { return `<${structName} ${args.map(a => scmStringify(this[a])).join(' ')}>`; }
+  const isStruct = function(expr) { return expr[1] && expr[1].structName == structName; };
 
   defun(`make-${structName}`, function(expr) {
     const obj = { structName, toString };
@@ -295,16 +264,14 @@ function scmStringify(expr)
     return '';
   } else if (expr.hasOwnProperty('toString')) {
     return expr.toString();
-  } else if (expr === true) {
-    return '#t';
-  } else if (expr === false) {
-    return '#f';
+  } else if (typeof expr == 'boolean') {
+    return `#${expr}`;
   } else if (isFunction(expr)) {
     return expr.funcName;
   } else if (isSymbol(expr)) {
     return expr.symbol;
   } else if (Array.isArray(expr)) {
-    return '(' + expr.map(scmStringify).join(' ') + ')';
+    return `(${expr.map(scmStringify).join(' ')})`;;
   } else {
     return JSON.stringify(expr);
   }
@@ -320,10 +287,7 @@ function scmApply(expr)
   const unpack = [];
   if (Array.isArray(args)) {
     for (let i = 0; i < args.length; i++) {
-      argSub[args[i].symbol] = expr[i + 1];
-      if (argSub[args[i].symbol] === undefined) {
-        argSub[args[i].symbol] = false;
-      }
+      argSub[args[i].symbol] = (expr[i + 1] === undefined) ? false : expr[i + 1];
     }
   } else if (isSymbol(args)) {
     argSub[args.symbol] = expr.slice(1);
@@ -334,31 +298,31 @@ function scmApply(expr)
 
 function scmMetaStep(substep, getApply, expr, didStep)
 {
-  const result = [];
+  let result = [];
   for (const child of expr) {
     if (didStep) {
-      if (child !== undefined) result.push(child);
+      result.push(child);
     } else {
       const childResult = substep(child);
-      if (childResult.step) {
+      didStep = didStep || childResult.step;
+      result.push(childResult.expr);
+    }
+  }
+  result = result.filter(x => x !== undefined);
+  if (!didStep && result.length > 0) {
+    try {
+      const apply = getApply(result[0]);
+      if (apply) {
+        result = apply(result);
         didStep = true;
       }
-      if (childResult.expr !== undefined) result.push(childResult.expr);
-    }
-  }
-  if (!didStep && result.length > 0) {
-    const apply = getApply(result[0]);
-    if (apply) {
-      try {
-        return { step: true, expr: apply(result, didStep) };
-      } catch (err) {
-        if (!err.doNotExpand) {
-          throw err;
-        }
+    } catch (err) {
+      if (!err.doNotExpand) {
+        throw err;
       }
     }
   }
-  return { step: didStep, expr: result };
+  return { step: didStep, expr: Array.isArray(result) ? result.filter(x => x !== undefined) : result };
 }
 
 function scmMacroStep(expr, didStep = false)
@@ -385,8 +349,7 @@ function scmStep(expr, didStep = false)
     // Replacing a symbol with a function would result in a "step" that isn't visible
     return { step: didResolve && !isFunction(resolved), expr: didResolve ? resolved : expr };
   }
-  const macro = resolveSymbolIn(expr[0], [macros]);
-  if (macro) {
+  if (resolveSymbolIn(expr[0], [macros])) {
     return scmMacroStep(expr);
   }
   return scmMetaStep(
@@ -401,11 +364,7 @@ function scmEvalAsync(expr, callback)
 {
   try {
     const step = scmStep(expr);
-    if (step.step) {
-      setTimeout(() => scmEvalAsync(step.expr, callback), 0);
-    } else {
-      callback(step.expr, null);
-    }
+    setTimeout(() => callback(step, null), 0);
   } catch (err) {
     callback(null, err);
   }
@@ -426,51 +385,51 @@ function prepare()
   let defsExpr = tokenize(el.defs.value);
   defs = Object.create(staticDefs);
   scmEval(defsExpr);
-  lastStep = tokenize(el.expr.value);
+  return lastStep = tokenize(el.expr.value);
+}
+
+function showError(err)
+{
+  el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
+  console.error(err);
+}
+
+function showResult(result)
+{
+  el.output.innerText = (result || []).map(scmStringify).join('\n');
+}
+
+function appendStep(result)
+{
+  el.steps.innerHTML = (el.output.innerHTML || el.steps.innerHTML ? '<hr/>' : '') + el.output.innerHTML + el.steps.innerHTML;
+  lastStep = result.expr;
+  showResult(lastStep);
+}
+
+function singleStep(callback = null)
+{
+  if (!callback) callback = appendStep;
+  if (lastStep === undefined) prepare();
+  scmEvalAsync(lastStep, (result, err) => (err ? showError(err) : callback(result)));
 }
 
 function evaluate()
 {
+  el.steps.innerHTML = '';
+  el.output.innerHTML = '';
   prepare();
-  scmEvalAsync(lastStep, (result, err) => {
+  const step = () => scmEvalAsync(lastStep, (result, err) => {
     if (err) {
-      el.output.innerText = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
-      console.error(err);
+      showError(err);
+    } else if (result.step) {
+      lastStep = result.expr;
+      step();
     } else {
-      el.output.innerText = result.map(scmStringify).join('\n');
+      showResult(result.expr);
+      clearLastStep();
     }
-    clearLastStep();
   });
-}
-
-function singleStep()
-{
-  try {
-    if (lastStep === undefined) {
-      prepare();
-    } else {
-      el.steps.innerHTML = '<hr/>' + el.output.innerHTML + el.steps.innerHTML;
-      const nextStep = [];
-      let didStep = false;
-      for (const x of lastStep) {
-        if (x === undefined) continue;
-        if (didStep) {
-          nextStep.push(x);
-        } else {
-          const result = scmStep(x);
-          didStep = result.step;
-          if (result.expr !== undefined) {
-            nextStep.push(result.expr);
-          }
-        }
-      }
-      lastStep = nextStep;
-    }
-    el.output.innerText = lastStep.map(scmStringify).join('\n');
-  } catch (err) {
-    el.output.innerHTML = '<div style="color:red;font-weight:bold">' + err.toString() + '</div>';
-    throw err;
-  }
+  step();
 }
 
 function clearLastStep() {
@@ -483,7 +442,7 @@ function saveToLocalStorage() {
 };
 
 evalButton.onclick = evaluate;
-stepButton.onclick = singleStep;
+stepButton.onclick = () => singleStep();
 saveButton.onclick = saveToLocalStorage;
 el.defs.onchange = clearLastStep;
 el.expr.onchange = clearLastStep;
