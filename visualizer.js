@@ -277,6 +277,25 @@ function scmStringify(expr)
   }
 }
 
+function scmFlatten(expr)
+{
+  if (expr === undefined) {
+    return [];
+  } else if (expr.hasOwnProperty('toString')) {
+    return [expr.toString()];
+  } else if (typeof expr == 'boolean') {
+    return [`#${expr}`];
+  } else if (isFunction(expr)) {
+    return [expr.funcName];
+  } else if (isSymbol(expr)) {
+    return [expr.symbol];
+  } else if (Array.isArray(expr)) {
+    return ['(', ...[].concat(...expr.map(scmFlatten)), ')'];
+  } else {
+    return [JSON.stringify(expr)];
+  }
+}
+
 function scmApply(expr)
 {
   if (expr[0].proc) {
@@ -394,9 +413,55 @@ function showError(err)
   console.error(err);
 }
 
+function formatDiff(before, after)
+{
+  const result = [];
+  const segments = Diff.diffArrays(before, after);
+  console.log(segments)
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.removed) {
+      if (i + 1 < segments.length) {
+        const nextSeg = segments[i + 1];
+        if (nextSeg.added) {
+          result.push('\x02', ...nextSeg.value, '\x01');
+          i++;
+          continue;
+        }
+      }
+      result.push('\x03');
+    } else if (seg.added) {
+      result.push('\x04', ...seg.value, '\x01');
+    } else {
+      result.push(...seg.value);
+    }
+  }
+  return result.join(' ')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br/>')
+    .replace(/\x01/g, '</span>')
+    .replace(/\x02/g, '<span class="change">')
+    .replace(/\x03/g, '<span class="delete">&nbsp;</span>')
+    .replace(/\x04/g, '<span class="insert">')
+    .replace(/[(] /g, '(')
+    .replace(/ [)]/g, ')');
+}
+
+let lastStepTokens = '';
 function showResult(result)
 {
-  el.output.innerText = (result || []).map(scmStringify).join('\n');
+  const lineTokens = (result || []).map(scmFlatten);
+  const tokens = [];
+  for (const line of lineTokens) {
+    if (tokens.length) {
+      tokens.push('\n');
+    }
+    tokens.push(...line);
+  }
+  el.output.innerHTML = formatDiff(lastStepTokens, tokens);
+  lastStepTokens = tokens;
 }
 
 function appendStep(result)
